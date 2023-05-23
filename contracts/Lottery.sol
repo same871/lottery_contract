@@ -3,13 +3,28 @@ pragma solidity ^0.8.18;
 
 import "@chainlink/contracts/src/v0.8/interfaces/VRFCoordinatorV2Interface.sol";
 import "@chainlink/contracts/src/v0.8/VRFConsumerBaseV2.sol";
-import "@chainlink/contracts/src/v0.8/ConfirmedOwner.sol";
-
+import "@chainlink/contracts/src/v0.8/interfaces/KeeperCompatibleInterface.sol";
+/** Errors */
 error Lottery__NotEnoughETHEntered();
 error Lottery__TransferFailed();
+error Lottery_NotOpen();
+error Lottery__UpkeepNotNeeded(uint256 currentBalance, uint256 numPlayers, uint256 lotteryState);
 
-contract Lottery is VRFConsumerBaseV2 {
+/**
+ * @title A sample Lottery Contract
+ * @author Samuel Muto
+ * @notice This contract is for creating a sample lottery contract
+ * @dev This implements ChainLink VRF version 2
+ */
+contract Lottery is VRFConsumerBaseV2, KeeperCompatibleInterface {
+    // Type declarations
+    enum LotteryState {
+        OPEN,
+        CALCULATING
+    }
+
     /** state Variables */
+    // Chainlink VRF variables
     uint256 private immutable i_entranceFee;
     address payable[] private s_players;
     VRFCoordinatorV2Interface private immutable i_vrfCoodinator;
@@ -21,37 +36,40 @@ contract Lottery is VRFConsumerBaseV2 {
 
     /** Lottery variables */
     address private s_recentWinner;
+    LotteryState private s_lotteryState;
+    uint256 private s_lastTimeStamp;
+    uint256 private immutable i_interval;
 
     /** Events */
     event LotteryEnter(address indexed player);
     event RequestedLotteryWinner(uint256 indexed requestId);
     event WinnerPicked(address indexed winner);
 
+    /** Functions */
     constructor(
         address vrfCoodinatorV2,
         uint256 entranceFee,
         bytes32 gasLane,
         uint64 subscriptionId,
-        uint32 callbackGasLimit
+        uint32 callbackGasLimit,
+        uint256 interval
     ) VRFConsumerBaseV2(vrfCoodinatorV2) {
         i_entranceFee = entranceFee;
         i_vrfCoodinator = VRFCoordinatorV2Interface(vrfCoodinatorV2);
         i_gasLane = gasLane;
         i_subscriptionId = subscriptionId;
         i_callbackGasLimit = callbackGasLimit;
-    }
-
-    function getEntranceFee() public view returns (uint256) {
-        return i_entranceFee;
-    }
-
-    function getPlayer(uint256 index) public view returns (address) {
-        return s_players[index];
+        s_lotteryState = LotteryState.OPEN;
+        s_lastTimeStamp = block.timestamp;
+        i_interval = interval;
     }
 
     function enterLottery() public payable {
         if (msg.value < i_entranceFee) {
             revert Lottery__NotEnoughETHEntered();
+        }
+        if (s_lotteryState != LotteryState.OPEN) {
+            revert Lottery_NotOpen();
         }
         s_players.push(payable(msg.sender));
         emit LotteryEnter(msg.sender);
@@ -59,10 +77,43 @@ contract Lottery is VRFConsumerBaseV2 {
         // Named events with the function name reversed
     }
 
-    function requestRandomWinner() external {
-        // request a random number
-        // once we get it, do something withit
-        // 2 transaction process
+    /**
+     * @dev This is the function that the chainlink Keeper nodes call
+     * they look for the 'upKeepNeeded' to return true
+     * The following should be true in order to return true
+     * 1. Our time interval should have passed
+     * 2. The lottery should have atleast 1 player and have some ETH
+     * 3. Our subscription is funded with link
+     * 4. Lottery should be in an "open" state
+     */
+
+    function checkUpkeep(
+        bytes memory /* checkData */
+    ) public view override returns (bool upkeepNeeded, bytes memory /* performData */) {
+        bool isOpen = (LotteryState.OPEN == s_lotteryState);
+        bool timePassed = (block.timestamp - s_lastTimeStamp) > i_interval;
+        bool hasPlayers = (s_players.length > 0);
+        bool hasBalance = address(this).balance > 0;
+        upkeepNeeded = (isOpen && timePassed && hasPlayers && hasBalance);
+        return (upkeepNeeded, "0x0");
+
+        // We don't use the checkData in this example. The checkData is defined when the Upkeep was registered.
+    }
+
+    /**
+     * @dev Once checkUpKeep is returnng true, this function is called
+     * and it kicks off a chainlink vrf call to get a random winner
+     */
+    function performUpkeep(bytes calldata /* performData */) external override {
+        (bool upkeepNeeded, ) = checkUpkeep("");
+        if (!upkeepNeeded) {
+            revert Lottery__UpkeepNotNeeded(
+                address(this).balance,
+                s_players.length,
+                uint256(s_lotteryState)
+            );
+        }
+        s_lotteryState = LotteryState.CALCULATING;
         uint256 requestId = i_vrfCoodinator.requestRandomWords(
             i_gasLane,
             i_subscriptionId,
@@ -73,6 +124,11 @@ contract Lottery is VRFConsumerBaseV2 {
         emit RequestedLotteryWinner(requestId);
     }
 
+    /**
+     * @dev this is the function that Chainlink VRF node
+     * calls to send the money to the random winner
+     */
+
     function fulfillRandomWords(
         uint256 /*_requestId*/,
         uint256[] memory _randomWords
@@ -80,6 +136,9 @@ contract Lottery is VRFConsumerBaseV2 {
         uint256 indexOfWinner = _randomWords[0] % s_players.length;
         address payable recentWinner = s_players[indexOfWinner];
         s_recentWinner = recentWinner;
+        s_lotteryState = LotteryState.OPEN;
+        s_players = new address payable[](0);
+        s_lastTimeStamp = block.timestamp;
         (bool success, ) = recentWinner.call{value: address(this).balance}("");
         if (!success) {
             revert Lottery__TransferFailed();
@@ -87,7 +146,41 @@ contract Lottery is VRFConsumerBaseV2 {
         emit WinnerPicked(recentWinner);
     }
 
+    /** Getter Functions */
+
+    function getRaffleState() public view returns (LotteryState) {
+        return s_lotteryState;
+    }
+
+    function getNumWords() public pure returns (uint256) {
+        return NUM_WORDS;
+    }
+
+    function getRequestConfirmations() public pure returns (uint256) {
+        return REQUEST_CONFIRMATIONS;
+    }
+
     function getRecentWinner() public view returns (address) {
         return s_recentWinner;
+    }
+
+    function getPlayer(uint256 index) public view returns (address) {
+        return s_players[index];
+    }
+
+    function getLastTimeStamp() public view returns (uint256) {
+        return s_lastTimeStamp;
+    }
+
+    function getInterval() public view returns (uint256) {
+        return i_interval;
+    }
+
+    function getEntranceFee() public view returns (uint256) {
+        return i_entranceFee;
+    }
+
+    function getNumberOfPlayers() public view returns (uint256) {
+        return s_players.length;
     }
 }
