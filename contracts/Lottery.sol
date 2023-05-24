@@ -148,7 +148,7 @@ contract Lottery is VRFConsumerBaseV2, KeeperCompatibleInterface {
 
     /** Getter Functions */
 
-    function getRaffleState() public view returns (LotteryState) {
+    function getLotteryState() public view returns (LotteryState) {
         return s_lotteryState;
     }
 
