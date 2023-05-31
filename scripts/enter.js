@@ -1,13 +1,13 @@
 const { ethers } = require("hardhat")
 
-async function enterRaffle() {
-    const raffle = await ethers.getContract("Raffle")
+async function enterLottery() {
+    const lottery = await ethers.getContract("Lottery")
     const entranceFee = await raffle.getEntranceFee()
-    await raffle.enterRaffle({ value: entranceFee + 1 })
+    await lottery.enterLottery({ value: entranceFee + 1 })
     console.log("Entered!")
 }
 
-enterRaffle()
+enterLottery()
     .then(() => process.exit(0))
     .catch((error) => {
         console.error(error)
